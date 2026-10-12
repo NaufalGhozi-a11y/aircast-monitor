@@ -147,13 +147,17 @@ export function generateEventTimeline(client: Client): MonitoringEvent[] {
     else if (roll > 0.45) kind = "RECOVERED";
     else kind = "NORMAL";
 
+    
     const descriptions: Record<EventKind, string> = {
       NORMAL: "Routine check-in, all metrics within range",
       WARNING: "Resource usage crossed warning threshold",
       HANG: "OnAir process unresponsive to health check",
       CRASH: "Process exited unexpectedly, container restarted",
       RECOVERED: "Metrics returned to normal range",
+      STOPPED: "OnAir process stopped",
+      STARTED: "OnAir process started",
     };
+
 
     events.push({
       id: `${client.id}-evt-${i}`,
