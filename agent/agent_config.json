@@ -1,0 +1,6 @@
+{
+  "api_url": "http://localhost:3000/api/agent/heartbeat",
+  "client_id": "ISI_CLIENT_ID",
+  "agent_token": "ISI_AGENT_TOKEN",
+  "agent_version": "1.0.0"
+}
