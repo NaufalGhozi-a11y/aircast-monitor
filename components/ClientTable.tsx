@@ -1,7 +1,7 @@
 
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
   ArrowUpDown,
@@ -13,7 +13,6 @@ import {
   Trash2,
 } from "lucide-react";
 import type { Client, ClientStatus } from "@/lib/types";
-
 import {
   StatusBadge,
   clientStatusTone,
@@ -55,42 +54,81 @@ export function ClientTable({
   const [sortKey, setSortKey] = useState<SortKey>("name");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [busyClientId, setBusyClientId] = useState<string | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
 
-  // FILTER OPTIONS
-  const uniqueLocations = Array.from(
-    new Set(clients.map((c) => c.location))
-  ).sort();
+  useEffect(() => {
+    let cancelled = false;
 
-  const uniqueAircastVersions = Array.from(
-    new Set(
-      clients
-        .map((c) => c.aircastVersion)
-        .filter((v) => v !== "—")
-    )
-  ).sort();
+    async function loadRole() {
+      try {
+        const response = await fetch("/api/auth/me", {
+          cache: "no-store",
+        });
 
-  // SEARCH, FILTER, AND SORT
+        if (!response.ok) {
+          if (!cancelled) setIsAdmin(false);
+          return;
+        }
+
+        const data = await response.json();
+
+        if (!cancelled) {
+          setIsAdmin(
+            data.profile?.role === "admin" &&
+            data.profile?.is_active === true
+          );
+        }
+      } catch (error) {
+        console.error("Failed to load client permissions:", error);
+        if (!cancelled) setIsAdmin(false);
+      }
+    }
+
+    void loadRole();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const uniqueLocations = useMemo(
+    () => [...new Set(clients.map((client) => client.location))].sort(),
+    [clients]
+  );
+
+  const uniqueAircastVersions = useMemo(
+    () =>
+      [
+        ...new Set(
+          clients
+            .map((client) => client.aircastVersion)
+            .filter((value) => value !== "—")
+        ),
+      ].sort(),
+    [clients]
+  );
+
   const filtered = useMemo(() => {
-    let rows = clients.filter((c) => {
+    let rows = clients.filter((client) => {
       const query = search.toLowerCase();
 
       if (
         search &&
-        !c.displayName.toLowerCase().includes(query) &&
-        !c.name.toLowerCase().includes(query)
+        !client.displayName.toLowerCase().includes(query) &&
+        !client.name.toLowerCase().includes(query)
       ) {
         return false;
       }
 
-      if (location !== "all" && c.location !== location) {
+      if (location !== "all" && client.location !== location) {
         return false;
       }
 
-      if (status !== "all" && c.status !== status) {
+      if (status !== "all" && client.status !== status) {
         return false;
       }
 
-      if (version !== "all" && c.aircastVersion !== version) {
+      if (version !== "all" && client.aircastVersion !== version) {
         return false;
       }
 
@@ -98,47 +136,37 @@ export function ClientTable({
     });
 
     rows = [...rows].sort((a, b) => {
-      let cmp = 0;
+      let comparison = 0;
 
       if (sortKey === "name") {
-        cmp = a.displayName.localeCompare(b.displayName);
+        comparison = a.displayName.localeCompare(b.displayName);
       } else if (sortKey === "lastSeenMinutesAgo") {
-        cmp = a.lastSeenMinutesAgo - b.lastSeenMinutesAgo;
+        comparison = a.lastSeenMinutesAgo - b.lastSeenMinutesAgo;
       } else {
-        cmp = a[sortKey] - b[sortKey];
+        comparison = a[sortKey] - b[sortKey];
       }
 
-      return sortDir === "asc" ? cmp : -cmp;
+      return sortDir === "asc" ? comparison : -comparison;
     });
 
     return rows;
-  }, [
-    clients,
-    search,
-    location,
-    status,
-    version,
-    sortKey,
-    sortDir,
-  ]);
+  }, [clients, search, location, status, version, sortKey, sortDir]);
 
-  // SORT HANDLER
   function toggleSort(key: SortKey) {
     if (sortKey === key) {
-      setSortDir((dir) => (dir === "asc" ? "desc" : "asc"));
+      setSortDir((direction) =>
+        direction === "asc" ? "desc" : "asc"
+      );
     } else {
       setSortKey(key);
       setSortDir("asc");
     }
   }
 
-  // EDIT CLIENT
   async function handleEdit(client: Client) {
-    const pcName = window.prompt(
-      "Masukkan nama PC:",
-      client.displayName
-    );
+    if (!isAdmin) return;
 
+    const pcName = window.prompt("Masukkan nama PC:", client.displayName);
     if (pcName === null) return;
 
     const newName = pcName.trim();
@@ -163,23 +191,19 @@ export function ClientTable({
     setBusyClientId(client.id);
 
     try {
-      const res = await fetch(`/api/clients/${client.id}`, {
+      const response = await fetch(`/api/clients/${client.id}`, {
         method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           pcName: newName,
           location: newLocation.trim(),
         }),
       });
 
-      const data = await res.json().catch(() => null);
+      const data = await response.json().catch(() => null);
 
-      if (!res.ok) {
-        throw new Error(
-          data?.error || "Gagal memperbarui PC."
-        );
+      if (!response.ok) {
+        throw new Error(data?.error || "Gagal memperbarui PC.");
       }
 
       window.alert("Data PC berhasil diperbarui.");
@@ -195,8 +219,9 @@ export function ClientTable({
     }
   }
 
-  // DELETE CLIENT
   async function handleDelete(client: Client) {
+    if (!isAdmin) return;
+
     const confirmed = window.confirm(
       `Yakin ingin menghapus PC "${client.displayName}"?\n\nData monitoring dan data terkait PC ini juga akan dihapus.`
     );
@@ -206,16 +231,14 @@ export function ClientTable({
     setBusyClientId(client.id);
 
     try {
-      const res = await fetch(`/api/clients/${client.id}`, {
+      const response = await fetch(`/api/clients/${client.id}`, {
         method: "DELETE",
       });
 
-      const data = await res.json().catch(() => null);
+      const data = await response.json().catch(() => null);
 
-      if (!res.ok) {
-        throw new Error(
-          data?.error || "Gagal menghapus PC."
-        );
+      if (!response.ok) {
+        throw new Error(data?.error || "Gagal menghapus PC.");
       }
 
       window.alert(data?.message || "PC berhasil dihapus.");
@@ -233,14 +256,12 @@ export function ClientTable({
 
   return (
     <div className="space-y-3">
-      {/* SEARCH AND FILTER */}
       <div className="flex flex-wrap items-center gap-2.5">
         <div className="relative min-w-[220px] flex-1">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-base-400" />
-
           <Input
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(event) => setSearch(event.target.value)}
             placeholder="Search by PC name…"
             className="pl-8"
           />
@@ -248,21 +269,19 @@ export function ClientTable({
 
         <Select
           value={location}
-          onChange={(e) => setLocation(e.target.value)}
+          onChange={(event) => setLocation(event.target.value)}
           className="w-44"
         >
           <option value="all">All locations</option>
-          {uniqueLocations.map((loc) => (
-            <option key={loc} value={loc}>
-              {loc}
-            </option>
+          {uniqueLocations.map((item) => (
+            <option key={item} value={item}>{item}</option>
           ))}
         </Select>
 
         <Select
           value={status}
-          onChange={(e) =>
-            setStatus(e.target.value as "all" | ClientStatus)
+          onChange={(event) =>
+            setStatus(event.target.value as "all" | ClientStatus)
           }
           className="w-36"
         >
@@ -274,14 +293,12 @@ export function ClientTable({
 
         <Select
           value={version}
-          onChange={(e) => setVersion(e.target.value)}
+          onChange={(event) => setVersion(event.target.value)}
           className="w-40"
         >
           <option value="all">All versions</option>
-          {uniqueAircastVersions.map((v) => (
-            <option key={v} value={v}>
-              v{v}
-            </option>
+          {uniqueAircastVersions.map((item) => (
+            <option key={item} value={item}>v{item}</option>
           ))}
         </Select>
 
@@ -290,23 +307,18 @@ export function ClientTable({
         </span>
       </div>
 
-      {/* CLIENT TABLE */}
       <div className="overflow-x-auto rounded-md border border-base-700 bg-base-900">
         <table className="w-full min-w-[1000px] text-left text-[12.5px]">
           <thead>
             <tr className="border-b border-base-700 text-[11px] uppercase tracking-wide text-base-400">
               {SORT_LABELS.map(({ key, label }) => (
-                <th
-                  key={key}
-                  className="whitespace-nowrap px-4 py-3 font-medium"
-                >
+                <th key={key} className="whitespace-nowrap px-4 py-3 font-medium">
                   <button
                     type="button"
                     onClick={() => toggleSort(key)}
                     className="flex items-center gap-1 hover:text-base-100"
                   >
                     {label}
-
                     {sortKey === key ? (
                       sortDir === "asc" ? (
                         <ArrowUp className="h-3 w-3" />
@@ -319,26 +331,11 @@ export function ClientTable({
                   </button>
                 </th>
               ))}
-
-              <th className="whitespace-nowrap px-4 py-3 font-medium">
-                Location
-              </th>
-
-              <th className="whitespace-nowrap px-4 py-3 font-medium">
-                Status
-              </th>
-
-              <th className="whitespace-nowrap px-4 py-3 font-medium">
-                OnAir
-              </th>
-
-              <th className="whitespace-nowrap px-4 py-3 font-medium">
-                Containers
-              </th>
-
-              <th className="whitespace-nowrap px-4 py-3 text-center font-medium">
-                Action
-              </th>
+              <th className="whitespace-nowrap px-4 py-3 font-medium">Location</th>
+              <th className="whitespace-nowrap px-4 py-3 font-medium">Status</th>
+              <th className="whitespace-nowrap px-4 py-3 font-medium">OnAir</th>
+              <th className="whitespace-nowrap px-4 py-3 font-medium">Containers</th>
+              <th className="whitespace-nowrap px-4 py-3 text-center font-medium">Action</th>
             </tr>
           </thead>
 
@@ -351,37 +348,24 @@ export function ClientTable({
                   key={client.id}
                   className="text-base-200 transition-colors hover:bg-base-850"
                 >
-                  {/* PC NAME */}
                   <td className="whitespace-nowrap px-4 py-3 font-medium text-base-100">
                     {client.displayName}
                   </td>
-
-                  {/* CPU */}
                   <td className="whitespace-nowrap px-4 py-3 font-mono">
                     {formatPercent(client.cpu)}
                   </td>
-
-                  {/* RAM */}
                   <td className="whitespace-nowrap px-4 py-3 font-mono">
                     {formatPercent(client.ram)}
                   </td>
-
-                  {/* DISK */}
                   <td className="whitespace-nowrap px-4 py-3 font-mono">
                     {formatPercent(client.disk)}
                   </td>
-
-                  {/* LAST SEEN */}
                   <td className="whitespace-nowrap px-4 py-3 text-base-400">
                     {formatRelativeMinutes(client.lastSeenMinutesAgo)}
                   </td>
-
-                  {/* LOCATION */}
                   <td className="whitespace-nowrap px-4 py-3 text-base-400">
                     {client.location}
                   </td>
-
-                  {/* STATUS */}
                   <td className="whitespace-nowrap px-4 py-3">
                     <StatusBadge
                       tone={clientStatusTone(client.status)}
@@ -389,8 +373,6 @@ export function ClientTable({
                       className="capitalize"
                     />
                   </td>
-
-                  {/* ONAIR STATUS */}
                   <td className="whitespace-nowrap px-4 py-3">
                     <StatusBadge
                       tone={onAirTone(client.onAir)}
@@ -398,16 +380,11 @@ export function ClientTable({
                       className="capitalize"
                     />
                   </td>
-
-                  {/* CONTAINER COUNT */}
                   <td className="whitespace-nowrap px-4 py-3 font-mono text-base-400">
                     {client.containerCount}
                   </td>
-
-                  {/* ACTION */}
                   <td className="whitespace-nowrap px-4 py-3">
                     <div className="flex items-center justify-center gap-2">
-                      {/* VIEW */}
                       <Link
                         href={`/clients/${client.id}`}
                         title="Lihat detail PC"
@@ -418,30 +395,31 @@ export function ClientTable({
                         View
                       </Link>
 
-                      {/* EDIT */}
-                      
-                      <Link
-                        href={`/clients/${client.id}/edit`}
-                        title="Edit PC"
-                        aria-label={`Edit ${client.displayName}`}
-                        className="inline-flex h-8 items-center justify-center gap-1.5 rounded-full border border-base-600 px-3 text-xs font-medium text-base-200 transition-colors hover:border-base-400 hover:bg-base-800"
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                        Edit
-                      </Link>
+                      {isAdmin && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => void handleEdit(client)}
+                            disabled={busy}
+                            title="Edit PC"
+                            className="inline-flex h-8 items-center justify-center gap-1.5 rounded-full border border-base-600 px-3 text-xs font-medium text-base-200 transition-colors hover:border-base-400 hover:bg-base-800 disabled:opacity-50"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                            Edit
+                          </button>
 
-                      {/* DELETE */}
-                      <button
-                        type="button"
-                        onClick={() => handleDelete(client)}
-                        disabled={busy}
-                        title="Hapus PC"
-                        aria-label={`Hapus ${client.displayName}`}
-                        className="inline-flex h-8 items-center justify-center gap-1.5 rounded-full border border-red-500/50 px-3 text-xs font-medium text-red-500 transition-colors hover:border-red-500 hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                        Delete
-                      </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleDelete(client)}
+                            disabled={busy}
+                            title="Hapus PC"
+                            className="inline-flex h-8 items-center justify-center gap-1.5 rounded-full border border-red-500/50 px-3 text-xs font-medium text-red-500 transition-colors hover:border-red-500 hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            Delete
+                          </button>
+                        </>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -450,10 +428,7 @@ export function ClientTable({
 
             {filtered.length === 0 && (
               <tr>
-                <td
-                  colSpan={10}
-                  className="px-4 py-10 text-center text-base-400"
-                >
+                <td colSpan={10} className="px-4 py-10 text-center text-base-400">
                   No clients match these filters.
                 </td>
               </tr>

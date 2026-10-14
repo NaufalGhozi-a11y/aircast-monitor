@@ -6,9 +6,23 @@ import {
   hashToken,
 } from "@/lib/server/agent-auth";
 import { supabaseAdmin } from "@/lib/server/supabase";
+import {
+  getCurrentAppUser,
+  requireAdmin,
+} from "@/lib/server/user-admin";
 
 export async function GET() {
   try {
+    // Pengguna harus login dan akunnya aktif.
+    const auth = await getCurrentAppUser();
+
+    if (auth.responseStatus !== 200 || !auth.profile) {
+      return NextResponse.json(
+        { error: "Unauthorized or inactive account." },
+        { status: auth.responseStatus }
+      );
+    }
+
     const { data, error } = await supabaseAdmin
       .from("clients")
       .select("*")
@@ -28,14 +42,12 @@ export async function GET() {
           containerResult,
           imageResult,
         ] = await Promise.all([
-          // DATA LIVE TERBARU
           supabaseAdmin
             .from("client_live_state")
             .select("*")
             .eq("client_id", c.id)
             .maybeSingle(),
 
-          // FALLBACK RIWAYAT METRIC
           supabaseAdmin
             .from("client_metrics")
             .select("*")
@@ -44,13 +56,11 @@ export async function GET() {
             .limit(1)
             .maybeSingle(),
 
-          // CONTAINERS
           supabaseAdmin
             .from("client_containers")
             .select("id, container_name, image")
             .eq("client_id", c.id),
 
-          // AIRCAST IMAGES
           supabaseAdmin
             .from("client_aircast_images")
             .select("version, tag")
@@ -58,35 +68,22 @@ export async function GET() {
             .order("updated_at", { ascending: false }),
         ]);
 
-        if (liveResult.error) {
-          throw liveResult.error;
-        }
+        if (liveResult.error) throw liveResult.error;
+        if (metricResult.error) throw metricResult.error;
+        if (containerResult.error) throw containerResult.error;
+        if (imageResult.error) throw imageResult.error;
 
-        if (metricResult.error) {
-          throw metricResult.error;
-        }
-
-        if (containerResult.error) {
-          throw containerResult.error;
-        }
-
-        if (imageResult.error) {
-          throw imageResult.error;
-        }
-
-        // UTAMAKAN DATA LIVE
+        // Utamakan data live, gunakan metric sebagai fallback.
         const live = liveResult.data;
         const metric = metricResult.data;
         const current = live ?? metric;
 
-        // CLIENT STATUS
         const lastSeen = c.last_seen
           ? new Date(c.last_seen).getTime()
           : null;
 
         const baseStatus =
-          lastSeen !== null &&
-          now - lastSeen <= 60_000
+          lastSeen !== null && now - lastSeen <= 60_000
             ? "online"
             : lastSeen !== null
               ? "offline"
@@ -96,12 +93,11 @@ export async function GET() {
         const ram = Number(current?.ram_usage ?? 0);
 
         const status =
-          baseStatus === "online" &&
-          (cpu >= 85 || ram >= 85)
+          baseStatus === "online" && (cpu >= 85 || ram >= 85)
             ? "warning"
             : baseStatus;
 
-        // ACTIVE AIRCAST VERSION
+        // Versi image AirCast aktif.
         const containers = containerResult.data ?? [];
 
         const aircastContainer = containers.find(
@@ -111,57 +107,54 @@ export async function GET() {
               .includes("aircast-app")
         );
 
-        const activeAircastImage =
-          aircastContainer?.image || "";
+        const activeAircastImage = aircastContainer?.image || "";
 
         const activeVersionMatch =
-          activeAircastImage.match(
-            /:(\d+\.\d+\.\d+)$/
-          );
+          activeAircastImage.match(/:(\d+\.\d+\.\d+)$/);
 
-        const aircastVersion =
-          activeVersionMatch?.[1] || "—";
+        const aircastVersion = activeVersionMatch?.[1] || "—";
 
-        // RETURN CLIENT
+        // Jangan pernah kirim hash token agent ke browser.
+        const safeClient = Object.fromEntries(
+          Object.entries(c).filter(
+            ([key]) => key !== "agent_token_hash"
+          )
+        );
+
         return {
-          ...c,
+          ...safeClient,
 
           status,
 
-          // SYSTEM METRICS
+          // System metrics.
           cpu,
           ram,
           disk: Number(current?.disk_usage ?? 0),
 
-          // DISK LIVE DATA
-          diskActiveTime:
-            live?.disk_active_time ?? null,
+          // Disk live data.
+          diskActiveTime: live?.disk_active_time ?? null,
+          diskDrives: Array.isArray(live?.disk_drives)
+            ? live.disk_drives
+            : [],
 
-          diskDrives:
-            Array.isArray(live?.disk_drives)
-              ? live.disk_drives
-              : [],
-
-          // ONAIR STATUS
+          // OnAir status.
           onAir:
             current?.onair_status === "running"
               ? "running"
               : "stopped",
 
-          // CONTAINERS
+          // Containers.
           containerCount: containers.length,
 
-          // AIRCAST VERSION
+          // AirCast version.
           aircastVersion,
 
-          // LAST SEEN
+          // Last seen.
           lastSeenMinutesAgo:
             lastSeen !== null
               ? Math.max(
                   0,
-                  Math.floor(
-                    (now - lastSeen) / 60000
-                  )
+                  Math.floor((now - lastSeen) / 60_000)
                 )
               : 999999,
         };
@@ -177,12 +170,7 @@ export async function GET() {
     console.error("Get clients error:", error);
 
     return NextResponse.json(
-      {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Failed to load clients.",
-      },
+      { error: "Failed to load clients." },
       { status: 500 }
     );
   }
@@ -190,6 +178,16 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    // Hanya Admin yang boleh menambahkan client.
+    const auth = await requireAdmin();
+
+    if (!auth.authorized) {
+      return NextResponse.json(
+        { error: "Admin access required." },
+        { status: auth.responseStatus }
+      );
+    }
+
     const body = await request.json();
 
     const pcName = String(body.pcName ?? "").trim();
@@ -197,32 +195,26 @@ export async function POST(request: Request) {
     const station = String(body.station ?? "").trim();
     const clientType = String(
       body.clientType ?? "Studio PC"
-    );
+    ).trim();
     const notes = String(body.notes ?? "").trim();
 
-    // VALIDATION
     if (!pcName || !location) {
       return NextResponse.json(
-        {
-          error: "PC Name and Location are required.",
-        },
+        { error: "PC Name and Location are required." },
         { status: 400 }
       );
     }
 
-    // GENERATE AGENT TOKEN
+    // Generate agent token.
     const token = generateAgentToken();
 
-    // GENERATE CLIENT CODE
-    const clientCode = `AC-${pcName
-      .replace(/[^a-zA-Z0-9]/g, "")
-      .slice(0, 8)
-      .toUpperCase() || "CLIENT"}-${crypto
-      .randomUUID()
-      .slice(0, 6)
-      .toUpperCase()}`;
+    // Generate client code.
+    const clientCode = `AC-${
+      pcName.replace(/[^a-zA-Z0-9]/g, "").slice(0, 8).toUpperCase()
+        || "CLIENT"
+    }-${crypto.randomUUID().slice(0, 6).toUpperCase()}`;
 
-    // INSERT CLIENT
+    // Insert client.
     const { data, error } = await supabaseAdmin
       .from("clients")
       .insert({
@@ -249,19 +241,20 @@ export async function POST(request: Request) {
       .single();
 
     if (error) {
+      console.error("Insert client error:", error);
+
       return NextResponse.json(
-        { error: error.message },
+        { error: "Failed to create client." },
         { status: 500 }
       );
     }
 
-    // AGENT CONFIG
+    // Token asli hanya diberikan saat client dibuat oleh Admin.
     return NextResponse.json(
       {
         client: data,
         agent: {
-          apiUrl:
-            process.env.AGENT_PUBLIC_API_URL || "",
+          apiUrl: process.env.AGENT_PUBLIC_API_URL || "",
           clientId: data.id,
           token,
         },

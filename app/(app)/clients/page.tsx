@@ -12,6 +12,42 @@ export default function ClientsPage() {
   const [clients, setClients] = useState<Client[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  // Periksa role pengguna yang sedang login.
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadCurrentUser() {
+      try {
+        const res = await fetch("/api/auth/me", {
+          cache: "no-store",
+        });
+
+        if (!res.ok) {
+          if (!cancelled) setIsAdmin(false);
+          return;
+        }
+
+        const data = await res.json();
+
+        if (!cancelled) {
+          setIsAdmin(
+            data?.profile?.role === "admin" &&
+              data?.profile?.is_active === true
+          );
+        }
+      } catch {
+        if (!cancelled) setIsAdmin(false);
+      }
+    }
+
+    void loadCurrentUser();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -46,6 +82,7 @@ export default function ClientsPage() {
       }
 
       const rows = Array.isArray(data) ? data : [];
+
       setClients(rows.map(toClient));
       setError("");
     } catch (e) {
@@ -87,12 +124,14 @@ export default function ClientsPage() {
             {loading ? "Refreshing…" : "Refresh"}
           </Button>
 
-          <Link href="/clients/add">
-            <Button variant="primary" size="sm">
-              <Plus className="h-3.5 w-3.5" />
-              Add Client PC
-            </Button>
-          </Link>
+          {isAdmin && (
+            <Link href="/clients/add">
+              <Button variant="primary" size="sm">
+                <Plus className="h-3.5 w-3.5" />
+                Add Client PC
+              </Button>
+            </Link>
+          )}
         </div>
       </div>
 
