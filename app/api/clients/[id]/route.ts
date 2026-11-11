@@ -8,7 +8,7 @@ type RouteContext = {
 };
 
 // ============================================================
-// GET: DETAIL CLIENT — ADMIN DAN USER AKTIF
+// GET: DETAIL CLIENT — ADMIN ONLY
 // ============================================================
 
 export async function GET(

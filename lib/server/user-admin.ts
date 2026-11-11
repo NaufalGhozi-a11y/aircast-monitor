@@ -1,7 +1,8 @@
+
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 
-export type AppRole = "admin" | "user";
+export type AppRole = "admin";
 
 export type AppProfile = {
   id: string;
@@ -22,7 +23,6 @@ export const supabaseService = createSupabaseClient(
 );
 
 export async function getCurrentAppUser() {
-  // Periksa sesi login menggunakan cookie pengguna.
   const supabase = createClient();
 
   const {
@@ -38,7 +38,6 @@ export async function getCurrentAppUser() {
     };
   }
 
-  // Ambil profil menggunakan service role di sisi server.
   const { data: profile, error: profileError } =
     await supabaseService
       .from("profiles")
@@ -54,7 +53,6 @@ export async function getCurrentAppUser() {
     };
   }
 
-  // Tolak akses jika akun dinonaktifkan.
   if (profile.is_active !== true) {
     await supabase.auth.signOut();
 
@@ -65,8 +63,8 @@ export async function getCurrentAppUser() {
     };
   }
 
-  // Validasi role sebelum memberikan akses aplikasi.
-  if (profile.role !== "admin" && profile.role !== "user") {
+  // Hanya akun Admin yang diperbolehkan.
+  if (profile.role !== "admin") {
     return {
       user: null,
       profile: null,
@@ -87,14 +85,6 @@ export async function requireAdmin() {
   if (result.responseStatus !== 200 || !result.profile) {
     return {
       ...result,
-      authorized: false as const,
-    };
-  }
-
-  if (result.profile.role !== "admin") {
-    return {
-      ...result,
-      responseStatus: 403 as const,
       authorized: false as const,
     };
   }

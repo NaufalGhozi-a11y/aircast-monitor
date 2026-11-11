@@ -13,7 +13,7 @@ import {
 
 export async function GET() {
   try {
-    // Pengguna harus login dan akunnya aktif.
+    // Hanya Admin yang sudah login dan aktif.
     const auth = await getCurrentAppUser();
 
     if (auth.responseStatus !== 200 || !auth.profile) {

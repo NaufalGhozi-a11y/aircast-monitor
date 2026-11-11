@@ -17,19 +17,71 @@ interface ClientRow {
   hostname: string | null;
 }
 
+type AlertType =
+  | "HANG"
+  | "CRASH"
+  | "WARNING"
+  | "RECOVERED";
+
+type AlertSeverity =
+  | "critical"
+  | "warning"
+  | "info";
+
+function normalizeAlertType(
+  value: string | null
+): AlertType | null {
+  const type = String(value || "")
+    .trim()
+    .toUpperCase();
+
+  switch (type) {
+    case "HANG":
+    case "CRASH":
+    case "WARNING":
+    case "RECOVERED":
+      return type;
+
+    default:
+      return null;
+  }
+}
+
+function getSeverity(
+  type: AlertType
+): AlertSeverity {
+  switch (type) {
+    case "HANG":
+    case "CRASH":
+      return "critical";
+
+    case "WARNING":
+      return "warning";
+
+    case "RECOVERED":
+      return "info";
+  }
+}
+
 export async function GET() {
   try {
-    const { data, error } = await supabaseAdmin
-      .from("client_events")
-      .select("id, client_id, event_type, message, created_at")
-      .order("created_at", { ascending: false })
-      .limit(100);
+    // 1. Ambil event terbaru
+    const { data: eventData, error: eventError } =
+      await supabaseAdmin
+        .from("client_events")
+        .select(
+          "id, client_id, event_type, message, created_at"
+        )
+        .order("created_at", {
+          ascending: false,
+        })
+        .limit(500);
 
-    if (error) throw error;
+    if (eventError) throw eventError;
 
-    const events = (data ?? []) as EventRow[];
+    const events = (eventData ?? []) as EventRow[];
 
-    // Ambil semua client untuk menghindari penggunaan .in()
+    // 2. Ambil daftar client
     const { data: clientData, error: clientError } =
       await supabaseAdmin
         .from("clients")
@@ -39,67 +91,57 @@ export async function GET() {
 
     const clients = (clientData ?? []) as ClientRow[];
 
-    const clientNames = new Map<string, string>(
-      clients.map((client: ClientRow) => [
+    const clientNames = new Map<string, string>();
+
+    for (const client of clients) {
+      clientNames.set(
         client.id,
-        client.hostname || "PC tanpa nama",
-      ])
-    );
+        client.hostname || "PC tanpa nama"
+      );
+    }
 
-    const alerts = events.map((event: EventRow) => {
-      const rawType = String(event.event_type || "WARNING")
-        .trim()
-        .toUpperCase();
+    // 3. Filter event yang termasuk alert
+    const alerts = [];
 
-      const allowedTypes = [
-        "NORMAL",
-        "WARNING",
-        "HANG",
-        "CRASH",
-        "RECOVERED",
-        "STARTED",
-        "STOPPED",
-      ] as const;
+    for (const event of events) {
+      const type = normalizeAlertType(
+        event.event_type
+      );
 
-      type AlertType = (typeof allowedTypes)[number];
+      if (!type) continue;
 
-      const type: AlertType = allowedTypes.includes(
-        rawType as AlertType
-      )
-        ? (rawType as AlertType)
-        : "WARNING";
-
-      const severity =
-        type === "HANG" || type === "CRASH"
-          ? "critical"
-          : type === "STOPPED" || type === "WARNING"
-            ? "warning"
-            : "info";
-
-      const createdAt = new Date(event.created_at).getTime();
+      const createdAt = new Date(
+        event.created_at
+      ).getTime();
 
       const minutesAgo = Number.isFinite(createdAt)
         ? Math.max(
             0,
-            Math.floor((Date.now() - createdAt) / 60000)
+            Math.floor(
+              (Date.now() - createdAt) / 60000
+            )
           )
         : 0;
 
-      return {
+      alerts.push({
         id: event.id,
         clientId: event.client_id,
         clientName:
           clientNames.get(event.client_id) ||
           "PC tidak diketahui",
         type,
-        description: event.message || "Tidak ada deskripsi",
+        description:
+          event.message || "Tidak ada deskripsi",
         minutesAgo,
-        severity,
-      };
-    });
+        severity: getSeverity(type),
+      });
+    }
 
     return NextResponse.json(
-      { alerts },
+      {
+        alerts,
+        total: alerts.length,
+      },
       {
         headers: {
           "Cache-Control": "no-store",
@@ -110,7 +152,9 @@ export async function GET() {
     console.error("Get alerts error:", error);
 
     return NextResponse.json(
-      { error: "Gagal mengambil data alerts." },
+      {
+        error: "Gagal mengambil data alerts.",
+      },
       { status: 500 }
     );
   }

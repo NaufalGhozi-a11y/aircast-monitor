@@ -3,71 +3,107 @@ import { NextResponse } from "next/server";
 import { authenticateAgent } from "@/lib/server/agent-auth";
 import { supabaseAdmin } from "@/lib/server/supabase";
 
-export async function POST(request: Request) {
-  const auth = await authenticateAgent(request);
+export const dynamic = "force-dynamic";
 
-  if (!auth) {
-    return NextResponse.json(
-      { error: "Unauthorized" },
-      { status: 401 }
-    );
+function numberOrNull(value: any): number | null {
+  if (value === null || value === undefined || value === "") {
+    return null;
   }
 
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function arrayOrEmpty(value: any): any[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function objectOrEmpty(value: any): Record<string, any> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : {};
+}
+
+export async function POST(request: Request) {
   try {
-    const body = await request.json();
+    // 1. Autentikasi agent
+    const client = await authenticateAgent(request);
 
-    const clientId = auth.id;
-    const timestamp =
-      body.timestamp || new Date().toISOString();
-
-    const system = body.system || {};
-    const onair = body.onair || {};
-
-    const runtime =
-      body.runtime ||
-      body.container_runtime ||
-      {};
-
-    const containers = Array.isArray(body.containers)
-      ? body.containers
-      : Array.isArray(runtime.containers)
-        ? runtime.containers
-        : [];
-
-    const images = Array.isArray(
-      body.aircast_images?.images
-    )
-      ? body.aircast_images.images
-      : Array.isArray(body.aircast_images)
-        ? body.aircast_images
-        : [];
-
-    const onairStatus = normalizeOnAirStatus(
-      onair.status
-    );
-
-    // 1. Ambil status OnAir sebelumnya
-    const {
-      data: previousLive,
-      error: previousLiveError,
-    } = await supabaseAdmin
-      .from("client_live_state")
-      .select("onair_status")
-      .eq("client_id", clientId)
-      .limit(1);
-
-    if (previousLiveError) {
-      throw previousLiveError;
+    if (!client) {
+      return NextResponse.json(
+        { error: "Unauthorized agent." },
+        { status: 401 }
+      );
     }
 
+    const body = await request.json();
+    const clientId = client.id;
+    const timestamp = new Date().toISOString();
+
+    const system = objectOrEmpty(body.system);
+    const onair = objectOrEmpty(body.onair);
+
+    const runtime = objectOrEmpty(body.runtime);
+
+    const containers = arrayOrEmpty(
+      body.containers ?? runtime.containers
+    );
+
+    const aircastImages = arrayOrEmpty(
+      body.aircast_images ??
+      body.aircastImages ??
+      body.aircast_images_list
+    );
+
+    const diskDrives = arrayOrEmpty(
+      body.disk_drives ?? system.disk_drives
+    );
+
+    // 2. Normalisasi status On Air
+    const onairStatus = String(
+      onair.status ?? body.onair_status ?? "unknown"
+    )
+      .trim()
+      .toLowerCase();
+
+    const cpuUsage = numberOrNull(
+      system.cpu_usage ?? system.cpu_percent ?? system.cpu
+    );
+
+    const ramUsage = numberOrNull(
+      system.ram_usage ?? system.ram_percent ?? system.ram
+    );
+
+    const diskUsage = numberOrNull(
+      system.disk_usage ?? system.disk_percent ?? system.disk
+    );
+
+    const onairCpu = numberOrNull(
+      onair.cpu_usage ?? onair.cpu
+    );
+
+    const onairRam = numberOrNull(
+      onair.ram_usage ?? onair.ram
+    );
+
+    const diskActiveTime = numberOrNull(
+      system.disk_active_time
+    );
+
+    // 3. Ambil status sebelumnya
+    const { data: previousState, error: previousError } =
+      await supabaseAdmin
+        .from("client_live_state")
+        .select("onair_status")
+        .eq("client_id", clientId)
+        .maybeSingle();
+
+    if (previousError) throw previousError;
+
     const previousStatus =
-      previousLive?.[0]?.onair_status || null;
+      previousState?.onair_status ?? null;
 
-    // 2. Tentukan perubahan status
-    const statusChanged =
-      previousStatus !== null &&
-      previousStatus !== onairStatus;
-
+    // 4. Deteksi insiden
     const incidentStarted =
       onairStatus === "hang" &&
       previousStatus !== "hang";
@@ -76,187 +112,80 @@ export async function POST(request: Request) {
       previousStatus === "hang" &&
       onairStatus === "running";
 
-    const shouldSaveMetric =
-      incidentStarted || incidentRecovered;
-
-    // 3. Update informasi client
-    const {
-      error: clientError,
-    } = await supabaseAdmin
+    // 5. Update informasi client
+    const { error: clientError } = await supabaseAdmin
       .from("clients")
       .update({
-        hostname: body.hostname || null,
-        ip_address: body.ip_address || null,
-        agent_version: body.agent_version || null,
+        hostname: system.hostname ?? client.pc_name,
+        ip_address: system.ip_address ?? undefined,
+        agent_version: body.agent_version ?? undefined,
         last_seen: timestamp,
         status: "online",
-        updated_at: new Date().toISOString(),
+        updated_at: timestamp,
       })
       .eq("id", clientId);
 
-    if (clientError) {
-      throw clientError;
-    }
+    if (clientError) throw clientError;
 
-    // 4. Update live state
+    // 6. Simpan live state sesuai schema database
     const liveRow = {
       client_id: clientId,
       timestamp,
-
-      cpu_usage: numberOrNull(
-        system.cpu_usage ?? system.cpu_percent
-      ),
-
-      ram_usage: numberOrNull(
-        system.ram_usage ?? system.ram_percent
-      ),
-
-      disk_usage: numberOrNull(
-        system.disk_usage ?? system.disk_percent
-      ),
-
-      disk_active_time: numberOrNull(
-        system.disk_active_time ??
-        body.disk_active_time
-      ),
-
-      disk_drives: Array.isArray(system.disk_drives)
-        ? system.disk_drives
-        : Array.isArray(body.disk_drives)
-          ? body.disk_drives
-          : [],
-
+      cpu_usage: cpuUsage,
+      ram_usage: ramUsage,
+      disk_usage: diskUsage,
       onair_status: onairStatus,
-
-      onair_cpu: numberOrNull(
-        onair.cpu_usage ?? onair.cpu_percent
-      ),
-
-      onair_ram: numberOrNull(
-        onair.ram_usage ?? onair.ram_gb
-      ),
-
+      onair_cpu: onairCpu,
+      onair_ram: onairRam,
       containers,
-      aircast_images: images,
-      updated_at: new Date().toISOString(),
+      aircast_images: aircastImages,
+      disk_active_time: diskActiveTime,
+      disk_drives: diskDrives,
+      updated_at: timestamp,
     };
 
-    const {
-      error: deleteLiveError,
-    } = await supabaseAdmin
+    const { error: liveError } = await supabaseAdmin
       .from("client_live_state")
-      .delete()
-      .eq("client_id", clientId);
+      .upsert(liveRow, {
+        onConflict: "client_id",
+      });
 
-    if (deleteLiveError) {
-      throw deleteLiveError;
-    }
+    if (liveError) throw liveError;
 
-    const {
-      error: liveError,
-    } = await supabaseAdmin
-      .from("client_live_state")
-      .insert(liveRow);
-
-    if (liveError) {
-      throw liveError;
-    }
-
-    // 5. Simpan riwayat grafik setiap 1 menit
-    const {
-      data: historyRows,
-      error: historyError,
-    } = await supabaseAdmin
+    // 7. Simpan dashboard history
+    const { error: historyError } = await supabaseAdmin
       .from("dashboard_metric_history")
-      .select("timestamp")
-      .eq("client_id", clientId)
-      .order("timestamp", { ascending: false })
-      .limit(1);
+      .insert({
+        client_id: clientId,
+        timestamp,
+        cpu_usage: cpuUsage,
+        ram_usage: ramUsage,
+      });
 
-    if (historyError) {
-      throw historyError;
-    }
+    if (historyError) throw historyError;
 
-    const lastHistory =
-      historyRows?.[0]?.timestamp;
+    // 8. Simpan metrics saat terjadi insiden
+    const incidentDetected =
+      incidentStarted || incidentRecovered;
 
-    const currentTime =
-      new Date(timestamp).getTime();
-
-    const lastTime = lastHistory
-      ? new Date(lastHistory).getTime()
-      : 0;
-
-    const shouldSaveHistory =
-      !lastHistory ||
-      (
-        Number.isFinite(currentTime) &&
-        Number.isFinite(lastTime) &&
-        currentTime - lastTime >= 60_000
-      );
-
-    if (shouldSaveHistory) {
-      const {
-        error: historyInsertError,
-      } = await supabaseAdmin
-        .from("dashboard_metric_history")
-        .insert({
-          client_id: clientId,
-          timestamp,
-
-          cpu_usage: numberOrNull(
-            system.cpu_usage ?? system.cpu_percent
-          ),
-
-          ram_usage: numberOrNull(
-            system.ram_usage ?? system.ram_percent
-          ),
-        });
-
-      if (historyInsertError) {
-        throw historyInsertError;
-      }
-    }
-
-    // 6. Simpan metric hanya ketika ada incident
-    if (shouldSaveMetric) {
-      const {
-        error: metricError,
-      } = await supabaseAdmin
+    if (incidentDetected) {
+      const { error: metricError } = await supabaseAdmin
         .from("client_metrics")
         .insert({
           client_id: clientId,
           timestamp,
-
-          cpu_usage: numberOrNull(
-            system.cpu_usage ?? system.cpu_percent
-          ),
-
-          ram_usage: numberOrNull(
-            system.ram_usage ?? system.ram_percent
-          ),
-
-          disk_usage: numberOrNull(
-            system.disk_usage ?? system.disk_percent
-          ),
-
+          cpu_usage: cpuUsage,
+          ram_usage: ramUsage,
+          disk_usage: diskUsage,
           onair_status: onairStatus,
-
-          onair_cpu: numberOrNull(
-            onair.cpu_usage ?? onair.cpu_percent
-          ),
-
-          onair_ram: numberOrNull(
-            onair.ram_usage ?? onair.ram_gb
-          ),
+          onair_cpu: onairCpu,
+          onair_ram: onairRam,
         });
 
-      if (metricError) {
-        throw metricError;
-      }
+      if (metricError) throw metricError;
     }
 
-    // 7. Simpan Monitoring Events
+    // 9. Simpan event HANG dan RECOVERED saja
     const eventRows: {
       client_id: string;
       event_type: string;
@@ -264,354 +193,66 @@ export async function POST(request: Request) {
       created_at: string;
     }[] = [];
 
-    if (
-      previousStatus !== null &&
-      previousStatus !== onairStatus
-    ) {
-      if (
-        onairStatus === "hang" &&
-        previousStatus !== "hang"
-      ) {
-        eventRows.push({
-          client_id: clientId,
-          event_type: "HANG",
-          message:
-            "OnAir terdeteksi tidak merespons.",
-          created_at: timestamp,
-        });
-      } else if (
-        previousStatus === "running" &&
-        onairStatus === "not_running"
-      ) {
-        eventRows.push({
-          client_id: clientId,
-          event_type: "STOPPED",
-          message:
-            "OnAir berhenti berjalan.",
-          created_at: timestamp,
-        });
-      } else if (
-        previousStatus === "hang" &&
-        onairStatus === "running"
-      ) {
-        eventRows.push({
-          client_id: clientId,
-          event_type: "RECOVERED",
-          message:
-            "OnAir kembali berjalan setelah terdeteksi hang.",
-          created_at: timestamp,
-        });
-      } else if (
-        previousStatus === "not_running" &&
-        onairStatus === "running"
-      ) {
-        eventRows.push({
-          client_id: clientId,
-          event_type: "STARTED",
-          message:
-            "OnAir kembali berjalan.",
-          created_at: timestamp,
-        });
-      }
+    if (incidentStarted) {
+      eventRows.push({
+        client_id: clientId,
+        event_type: "HANG",
+        message: "On Air terdeteksi tidak merespons.",
+        created_at: timestamp,
+      });
+    }
+
+    if (incidentRecovered) {
+      eventRows.push({
+        client_id: clientId,
+        event_type: "RECOVERED",
+        message: "On Air kembali berjalan setelah terdeteksi hang.",
+        created_at: timestamp,
+      });
     }
 
     let eventsSaved = 0;
 
     if (eventRows.length > 0) {
-      const {
-        error: eventError,
-      } = await supabaseAdmin
+      const { error: eventError } = await supabaseAdmin
         .from("client_events")
         .insert(eventRows);
 
-      if (eventError) {
-        throw eventError;
-      }
+      if (eventError) throw eventError;
 
       eventsSaved = eventRows.length;
     }
 
-    // 8. Perbarui container
-    const {
-      error: deleteContainerError,
-    } = await supabaseAdmin
-      .from("client_containers")
-      .delete()
-      .eq("client_id", clientId);
-
-    if (deleteContainerError) {
-      throw deleteContainerError;
-    }
-
-    if (containers.length > 0) {
-      const containerRows = containers.map(
-        (container: any) => ({
-          client_id: clientId,
-
-          container_name:
-            container.name ||
-            container.container_name ||
-            "unknown",
-
-          image: container.image || null,
-
-          status: normalizeContainerStatus(
-            container.status
-          ),
-
-          cpu_usage: numberOrNull(
-            container.cpu_value ??
-            container.cpu_percent_value ??
-            container.cpu ??
-            container.cpu_percent
-          ),
-
-          memory_usage: parseMemoryMb(
-            container.memory_mb ??
-            container.memory_used_mb ??
-            container.memory_used ??
-            container.mem_usage ??
-            container.memory_usage
-          ),
-
-          restart_count: numberOrNull(
-            container.restartCount ??
-            container.restart_count ??
-            container.restarts ??
-            0
-          ),
-        })
-      );
-
-      const {
-        error: containerError,
-      } = await supabaseAdmin
-        .from("client_containers")
-        .insert(containerRows);
-
-      if (containerError) {
-        throw containerError;
-      }
-    }
-
-    // 9. Perbarui AirCast images
-    const {
-      error: deleteImageError,
-    } = await supabaseAdmin
-      .from("client_aircast_images")
-      .delete()
-      .eq("client_id", clientId);
-
-    if (deleteImageError) {
-      throw deleteImageError;
-    }
-
-    if (images.length > 0) {
-      const imageRows = images.map(
-        (image: any) => ({
-          client_id: clientId,
-
-          repository: image.repository || null,
-          tag: image.tag || null,
-
-          image:
-            image.image ||
-            `${image.repository || ""}:${image.tag || ""}`,
-
-          version:
-            image.version ||
-            image.aircast_version ||
-            null,
-
-          image_id:
-            image.id ||
-            image.image_id ||
-            null,
-
-          size: image.size || null,
-        })
-      );
-
-      const {
-        error: imageError,
-      } = await supabaseAdmin
-        .from("client_aircast_images")
-        .insert(imageRows);
-
-      if (imageError) {
-        throw imageError;
-      }
-    }
-
-    // 10. Response
     return NextResponse.json({
       ok: true,
       client_id: clientId,
-      received_at: new Date().toISOString(),
+      received_at: timestamp,
       live_updated: true,
-      history_saved: shouldSaveHistory,
-      previous_onair_status: previousStatus,
-      current_onair_status: onairStatus,
-      status_changed: statusChanged,
+      history_saved: true,
+      metrics_saved: incidentDetected,
+      previous_status: previousStatus,
+      current_status: onairStatus,
+      status_changed:
+        previousStatus !== null &&
+        previousStatus !== onairStatus,
       incident_started: incidentStarted,
       incident_recovered: incidentRecovered,
-      incident_saved: shouldSaveMetric,
       events_saved: eventsSaved,
+      containers_received: containers.length,
+      images_received: aircastImages.length,
     });
   } catch (error) {
     console.error("Heartbeat error:", error);
 
     return NextResponse.json(
       {
-        error:
+        error: "Gagal memproses heartbeat.",
+        details:
           error instanceof Error
             ? error.message
-            : "Invalid heartbeat.",
+            : String(error),
       },
-      { status: 400 }
+      { status: 500 }
     );
   }
-}
-
-function numberOrNull(value: unknown) {
-  if (
-    value === null ||
-    value === undefined ||
-    value === ""
-  ) {
-    return null;
-  }
-
-  const n =
-    typeof value === "string"
-      ? Number(value.replace("%", "").trim())
-      : Number(value);
-
-  return Number.isFinite(n) ? n : null;
-}
-
-function parseMemoryMb(value: unknown) {
-  if (
-    value === null ||
-    value === undefined ||
-    value === ""
-  ) {
-    return null;
-  }
-
-  if (typeof value === "number") {
-    return Number.isFinite(value) ? value : null;
-  }
-
-  const text = String(value)
-    .trim()
-    .replace(",", ".");
-
-  const match = text.match(
-    /^([\d.]+)\s*(B|KiB|MiB|GiB|TiB|KB|MB|GB|TB)?$/i
-  );
-
-  if (!match) {
-    return null;
-  }
-
-  const number = Number(match[1]);
-
-  if (!Number.isFinite(number)) {
-    return null;
-  }
-
-  const unit = (match[2] || "MB").toUpperCase();
-
-  switch (unit) {
-    case "B":
-      return number / 1024 / 1024;
-
-    case "KIB":
-    case "KB":
-      return number / 1024;
-
-    case "MIB":
-    case "MB":
-      return number;
-
-    case "GIB":
-      return number * 1024;
-
-    case "GB":
-      return number * 1000;
-
-    case "TIB":
-      return number * 1024 * 1024;
-
-    case "TB":
-      return number * 1000 * 1000;
-
-    default:
-      return number;
-  }
-}
-
-function normalizeOnAirStatus(value: unknown) {
-  const status = String(value || "")
-    .trim()
-    .toLowerCase();
-
-  if (status === "hang") {
-    return "hang";
-  }
-
-  if (
-    status === "not_running" ||
-    status === "not running" ||
-    status === "stopped"
-  ) {
-    return "not_running";
-  }
-
-  if (
-    status === "running" ||
-    status === "normal"
-  ) {
-    return "running";
-  }
-
-  return "unknown";
-}
-
-function normalizeContainerStatus(value: unknown) {
-  const status = String(value || "")
-    .trim()
-    .toLowerCase();
-
-  if (!status) {
-    return "unknown";
-  }
-
-  if (
-    status.includes("restarting") ||
-    status.includes("restart")
-  ) {
-    return "restarting";
-  }
-
-  if (
-    status.includes("running") ||
-    status.startsWith("up ")
-  ) {
-    return "running";
-  }
-
-  if (
-    status.includes("exited") ||
-    status.includes("dead")
-  ) {
-    return "exited";
-  }
-
-  if (status.includes("created")) {
-    return "created";
-  }
-
-  return "unknown";
 }
